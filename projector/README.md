@@ -1,49 +1,222 @@
-https://en.wikipedia.org/wiki/Representational_state_transfer
+# React Authentication
 
-One noun, four verbs - restful api design. REST is an architecture for client - server systems. A certain set or rules to design an API. The focus of REST is on machine to machine communication. 
+## Backend
 
-https://stackoverflow.com/questions/36250615/cors-with-postman
-
-# Projector
-
-### First we create our backend as a REST API
-
-```
-$ npx ironlauncher projector --json
-```
-
-We also have to install the CORS package
-```
-$ cd projector 
-$ npm install cors
-```
-
-
-Now run the app
-```bash
-$ npm run dev
-```
-
-
-### Create the models
-
-We need projects and tasks - let's create the files for these two entities.
-
-```bash
-touch models/Project.js
-touch models/Task.js
-```
-
-And let's add the project model - later we will also add an owner field that references the User
+### Add the same configuration for session and passport to app.js as in module 2 
 
 ```js
-// models/Project.js
-const mongoose = require('mongoose');
-const { Schema, model } = mongoose;
+// app.js
+//
+// session configuration
+const session = require('express-session');
+// session store using mongo
+const MongoStore = require('connect-mongo')(session)
 
+const mongoose = require('./db/index');
+
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET,
+    cookie: { maxAge: 1000 * 60 * 60 * 24 },
+    saveUninitialized: false,
+    //Forces the session to be saved back to the session store, 
+    // even if the session was never modified during the request.
+    resave: true,
+    store: new MongoStore({
+      mongooseConnection: mongoose.connection
+    })
+  })
+)
+// end of session configuration
+
+// passport configuration
+const User = require('./models/User.model');
+const passport = require('passport');
+const LocalStrategy = require('passport-local').Strategy;
+const bcrypt = require('bcrypt');
+
+// we serialize only the `_id` field of the user to keep the information stored minimum
+passport.serializeUser((user, done) => {
+  done(null, user._id);
+});
+
+// when we need the information for the user, the deserializeUser function is called with the id that we previously serialized to fetch the user from the database
+passport.deserializeUser((id, done) => {
+  User.findById(id)
+    .then(dbUser => {
+      done(null, dbUser);
+    })
+    .catch(err => {
+      done(err);
+    });
+});
+
+passport.use(
+  new LocalStrategy((username, password, done) => {
+    // login
+    User.findOne({ username: username })
+      .then(userFromDB => {
+        if (userFromDB === null) {
+          // there is no user with this username
+          done(null, false, { message: 'Wrong Credentials' });
+        } else if (!bcrypt.compareSync(password, userFromDB.password)) {
+          // the password is not matching
+          done(null, false, { message: 'Wrong Credentials' });
+        } else {
+          // the userFromDB should now be logged in
+          done(null, userFromDB)
+        }
+      })
+      .catch(err => {
+        console.log(err);
+      })
+  })
+)
+
+app.use(passport.initialize());
+app.use(passport.session());
+
+
+// end of passport
+```
+
+#### In db/index.js we need to export mongoose as well
+```js
+// db/index.js
+// at the end of the file
+module.exports = mongoose;
+```
+
+#### If you have an error running the app - check connect-mongo version in the package.json of the server
+```json
+    "connect-mongo": "^3.2.0",
+```
+
+#### The auth routes should seem familiar. We only add one that returns the logged in user.
+
+```js
+const express = require('express');
+const router = express.Router();
+const User = require('../models/User');
+const bcrypt = require('bcrypt');
+const passport = require('passport');
+
+router.post('/signup', (req, res) => {
+  const { username, password } = req.body;
+
+  if (!password || password.length < 8) {
+    return res
+      .status(400)
+      .json({ message: 'Your password must be 8 char. min.' });
+  }
+  if (!username) {
+    return res.status(400).json({ message: 'Your username cannot be empty' });
+  }
+
+  User.findOne({ username: username })
+    .then(found => {
+      if (found) {
+        return res
+          .status(400)
+          .json({ message: 'This username is already taken' });
+      }
+
+      const salt = bcrypt.genSaltSync();
+      const hash = bcrypt.hashSync(password, salt);
+
+      return User.create({ username: username, password: hash }).then(
+        dbUser => {
+
+          req.login(dbUser, err => {
+            if (err) {
+              return res
+                .status(500)
+                .json({ message: 'Error while attempting to login' });
+            }
+            res.json(dbUser);
+          });
+        }
+      );
+    })
+    .catch(err => {
+      res.json(err);
+    });
+});
+
+router.post('/login', (req, res) => {
+  passport.authenticate('local', (err, user) => {
+    if (err) {
+      return res.status(500).json({ message: 'Error while authenticating' });
+    }
+    if (!user) {
+      return res.status(400).json({ message: 'Wrong credentials' });
+    }
+    req.login(user, err => {
+      if (err) {
+        return res
+          .status(500)
+          .json({ message: 'Error while attempting to login' });
+      }
+      return res.json(user);
+    });
+  })(req, res);
+});
+
+router.delete('/logout', (req, res) => {
+  req.logout();
+  res.json({ message: 'Successful logout' });
+});
+
+// returns the logged in user
+router.get('/loggedin', (req, res) => {
+  res.json(req.user);
+});
+
+module.exports = router;
+```
+
+#### And then we reference them in app.js
+
+```js
+// app.js
+//
+app.use('/api/auth', require('./routes/auth'));
+```
+
+#### We also have to add the User model.
+
+```bash
+$ touch models/User.js
+```
+
+```js
+// models/User.js
+const mongoose = require('mongoose');
+const Schema = mongoose.Schema;
+
+const userSchema = new Schema(
+  {
+    username: String,
+    password: String
+  },
+  {
+    timestamps: true
+  }
+);
+
+const User = mongoose.model('User', userSchema);
+module.exports = User;
+```
+
+#### After adding the user we also add an owner field to the projects model.
+
+```js
+// models/User.js
+//
 const projectSchema = new Schema({
   title: String,
   description: String,
+  owner: { type: Schema.Types.ObjectId, ref: 'User' },
   tasks: [
     {
       type: Schema.Types.ObjectId,
@@ -51,515 +224,194 @@ const projectSchema = new Schema({
     }
   ]
 });
-
-const Project = model('Project', projectSchema);
-
-module.exports = Project;
 ```
 
-Let's also add the Task model
-
-```js
-// models/Task.js 
-const mongoose = require('mongoose');
-const { Schema, model } = mongoose;
-
-const taskSchema = new Schema({
-  title: String,
-  description: String,
-  project: { type: Schema.Types.ObjectId, ref: 'Project' }
-});
-
-const Task = model('Task', taskSchema);
-
-module.exports = Task;
-```
-
-### Create the routes 
-
-|     Route     | HTTP Verb |          Description          |
-|---------------|-----------|-------------------------------|
-|   `api/projects`    |    GET    | Returns all projects |
-|   `api/projects`   |   POST    | Creates a new project  |
-|   `api/projects/:id`   |   GET    | Returns a specific project  |
-|   `api/projects/:id`   |   PUT    | Updates a specific project  |
-|   `api/projects/:id`   |   DELETE    | Deletes a specific project  |
-
-|     Route     | HTTP Verb |          Description          |
-|---------------|-----------|-------------------------------|
-|   `api/tasks`   |   POST    | Creates a new task  |
-|   `api/tasks/:id`   |   GET    | Returns a specific task  |
-|   `api/tasks/:id`   |   PUT    | Updates a specific task  |
-|   `api/tasks/:id`   |   DELETE    | Deletes a specific task  |
-
-Let's create a dedicated route file for every entity.
-
-```bash
-$ touch routes/project.js
-$ touch routes/task.js
-```
-
-We add the route to create a project first - if the project got created we want to respond with the status code 201 - resource created.
+#### We will also update the projects routes to add the owner.
 
 ```js
 // routes/project.js
-const express = require('express');
-const router = express.Router();
-const Project = require('../models/Project');
-
+//
 router.post('/', (req, res) => {
-  // const { title, description, tasks = [] } = req.body;
   const title = req.body.title;
   const description = req.body.description;
+  const owner = req.user._id;
   const tasks = [];
 
   Project.create({
-    title: title,
-    description: description,
-    tasks: tasks
-  })
-    .then(project => {
-      res.status(201).json(project);
-    })
-    .catch(err => {
-      res.json(err);
-    });
-});
-
-module.exports = router;
-```
-
-And we also have to reference the file in app.js
-
-```js
-// app.js
-//
-app.use('/api/projects', require('./routes/project'));
-//
-```
-
-Now we add the get route to get all the projects.
-
-```js
-// routes/project.js
-//
-// GET /api/projects
-router.get('/', (req, res) => {
-  Project.find()
-    .populate('tasks')
-    .then(projects => {
-      res.status(200).json(projects);
-    })
-    .catch(err => {
-      res.json(err);
-    });
-});
-```
-
-Now we add the route to get a specific project.
-
-```js
-// routes/project.js
-//
-// GET /api/projects/:id
-router.get('/:id', (req, res) => {
-  // check if req.params.id is valid, if not respond with a 4xx status code
-  Project.findById(req.params.id)
-    .populate('tasks')
-    .then(project => {
-      if (!project) {
-        res.status(404).json(project);
-      } else {
-        res.json(project);
-      }
-    })
-    .catch(err => {
-      res.(200).json(err);
-    });
-});
-```
-
-Now we also add the routes to update a project.
-
-```js
-// routes/project.js
-//
-// PUT /api/projects/:id
-router.put('/:id', (req, res) => {
-  const { title, description } = req.body;
-
-  Project.findByIdAndUpdate(
-    req.params.id,
-    { title, description },
-    // { new: true } ensures that we are getting the updated document in the .then callback
-    { new: true }
-  )
-    .then(project => {
-      res.status(200).json(project);
-    })
-    .catch(err => {
-      res.json(err);
-    });
-});
-```
-
-And the route to delete a project. 
-
-We also have to take care of deleting all the tasks as soon as the associated project got deleted.
-
-```js
-// DELETE /api/projects/:id
-router.delete('/:id', (req, res) => {
-  // delete the project
-  Project.findByIdAndDelete(req.params.id)
-    .then(project => {
-      // Deletes all the documents in the Task collection where the value for the `_id` field is present in the `project.tasks` array
-      return Task.deleteMany({ _id: { $in: project.tasks } }).then(() => {
-        res.status(200).json({ message: 'ok' });
-      });
-    })
-    .catch(err => {
-      res.json(err);
-    });
-});
-```
-
-The routes for the projects are finished 💪
-
-Let's also add the routes for the tasks.
-
-In the post route to create a task we gonna send the project id in the post body.
-
-```js
-// routes/task.js
-
-const express = require('express');
-const Task = require('../models/Task');
-const Project = require('../models/Project');
-const router = express.Router();
-
-router.get('/:id', (req, res) => {
-  const id = req.params.id;
-
-  Task.findById(id)
-    .then(task => {
-      res.status(200).json(task);
-    })
-    .catch(err => {
-      res.json(err);
-    });
-});
-
-router.post('/', (req, res) => {
-  const { title, description, projectId } = req.body;
-
-  Task.create({
     title,
     description,
-    project: projectId
+    owner,
+    tasks,
   })
-    .then(task => {
-      return Project.findByIdAndUpdate(projectId, {
-        $push: { tasks: task._id }
-      }).then(() => {
-        res.status(201).json({
-          message: `Task with id ${task._id} was successfully added to project with id ${projectId}`
-        });
-      });
-    })
-    .catch(err => {
-      res.json(err);
-    });
-});
-
-router.put('/:id', (req, res, next) => {
-  const id = req.params.id;
-  const { title, description } = req.body;
-
-  Task.findByIdAndUpdate(id, { title, description }, { new: true })
-    .then(task => {
-      res.json(task);
-    })
-    .catch(err => {
-      res.json(err);
-    });
-});
-
-router.delete('/:id', (req, res, next) => {
-  const id = req.params.id;
-
-  Task.findByIdAndDelete(id)
-    .then(task => {
-      return Project.findByIdAndUpdate(task.project, {
-        $pull: { tasks: id }
-      }).then(() => {
-        res.json({ message: 'ok' });
-      });
-    })
-    .catch(err => {
-      res.json(err);
-    });
-});
-
-module.exports = router;
+//
 ```
 
-Your REST API is finished - let's proceed with the client.
+#### Now we are done with the backend. 💪
 
-### The client - a React app
+## Frontend
 
-In the root directory of our application we run create-react-app 
+#### First we need some methods to call the signup, login and logout routes on our backend.
 
 ```bash
-$ npx create-react-app client
+$ touch mkdir src/services
+$ touch src/services/auth.js
 ```
-
-We will need axios for the requests to the server and react router for our routing.
-
-```bash
-$ npm install axios react-router-dom
-```
-
-Also we will use bootstrap for the styling
-
-```bash
-$ npm install bootstrap react-bootstrap
-```
-
-Update the package.json file with a proxy.
 
 ```js
-// package.json
-  "name": "client",
-  "version": "0.1.0",
-  "proxy": "http://localhost:5555", 
-  "private": true,
-```
-
-First we add the functionality to create a project and to see all projects.
-
-We create two components for that Projects, that holds the projects in its state and ProjectList which renders all the projects.
-
-```bash
-$ mkdir src/components
-$ touch src/components/ProjectList.js
-$ touch src/components/Projects.js
-```
-
-Let's create the Projects component.
-
-```js
-// scr/components/Projects.js
-import React, { Component } from 'react';
-import ProjectList from './ProjectList';
+// services/auth.js
 import axios from 'axios';
 
-export default class Projects extends Component {
-  state = {
-    projects: []
-  };
-
-  componentDidMount = () => {
-    this.getData();
-  };
-
-  getData = () => {
-    axios
-      .get('/api/projects')
-      .then(response => {
-        this.setState({
-          projects: response.data
-        });
-      })
-      .catch(err => {
-        console.log(err);
-      });
-  };
-
-  render() {
-    return (
-      <div className='projects-container'>
-        <ProjectList projects={this.state.projects} />
-      </div>
-    );
-  }
-}
-```
-
-Next we add the ProjectList component to render the projects.
-
-```js
-// src/components/ProjectList.js
-import React from 'react';
-import { Link } from 'react-router-dom';
-
-const ProjectList = props => {
-  return (
-    <div>
-      {props.projects.length > 0 && <h2>Projects:</h2>}
-
-      {props.projects.map(project => {
-        return (
-          <div key={project._id}>
-            <h3>
-              {/* <Link to={`/projects/${project._id}`}>{project.title}</Link> */}
-              {project.title}
-            </h3>
-          </div>
-        );
-      })}
-    </div>
-  );
+const signup = (username, password) => {
+  return axios
+    .post('/api/auth/signup', { username, password })
+    .then(response => {
+      return response.data;
+    })
+    .catch(err => {
+      return err.response.data;
+    });
 };
 
-export default ProjectList;
+const login = (username, password) => {
+  return axios
+    .post('/api/auth/login', { username, password })
+    .then(response => {
+      return response.data;
+    })
+    .catch(err => {
+      return err.response.data;
+    });
+};
+
+const logout = () => {
+  return axios
+    .delete('/api/auth/logout')
+    .then(response => {
+      return response.data;
+    })
+    .catch(err => {
+      return err.response.data;
+    });
+};
+
+export { signup, login, logout };
 ```
 
-And reference the Projects component in the App.js
-
-We also have to add an import for bootstrap
+#### When our app starts we want to first check if there is a logged in User in the session and then give this user to App.js as a prop.
 
 ```js
-// App.js
-
-import React from 'react';
-import 'bootstrap/dist/css/bootstrap.css';
-import './App.css';
-import Projects from './components/Projects';
-
-function App() {
-  return (
-    <div className="App">
-      <Projects />
-    </div>
-  );
-}
-
-export default App;
-```
-
-
-
-We don't want to reference the Projects component directly in App.js. Instead let's add Routing and a Navbar.
-
-To add Routing we have to add everything with the Router - so we wrap the root component, this is App.js and it is referenced in index.js, the starting point of our app.
-
-```js
-// src/index.js
+// index.js
 import React from 'react';
 import ReactDOM from 'react-dom';
 import { BrowserRouter } from 'react-router-dom';
 import './index.css';
 import App from './App';
 import * as serviceWorker from './serviceWorker';
+// import axios
+import axios from 'axios';
 
-ReactDOM.render(
-  <BrowserRouter>
-    <App />
-  </BrowserRouter>,
-  document.getElementById('root')
-);
-```
-
-Now let's create a Navbar component and add some routing logic to App.js
-
-```bash
-$ touch src/components/Navbar.js
-```
-
-The Navbar for now just holds a link to home and to the projects overview. We need to import the Link component from react-router-dom and the bootstrap navbar. 
-
-```js
-// src/components/Navbar.js
-import React from 'react';
-import { Link } from 'react-router-dom';
-import { Navbar as Nav } from 'react-bootstrap';
-
-const Navbar = props => {
-  return (
-    <Nav className='nav justify-content-end' bg='primary'>
-      <Nav.Brand>
-        <Link to='/'>Home</Link>
-      </Nav.Brand>
-      <Nav.Brand>
-        <Link to='/projects'>Projects</Link>
-      </Nav.Brand>
-    </Nav>
-  );
-};
-
-export default Navbar;
-```
-
-Now we have to add the routing logic to App.js for these two routes and reference the Navbar.
-
-```js
-// src/App.js
+// get logged in user and pass it as a prop
+axios.get('/api/auth/loggedin')
+  .then(response => {
+    const user = response.data;
+    ReactDOM.render(
+      <BrowserRouter>
+        <App user={user} />
+      </BrowserRouter>,
+      document.getElementById('root')
+    );
+  });
 //
-import { Route } from 'react-router-dom';
+```
+
+#### We want to use a Signup component in the App.js - here we also add the user to the state
+#### Therefore we turn App.js into a class component.
+
+#### And we also have to add the state and the setState for the user
+```js
+// App.js
+import React from 'react';
+import 'bootstrap/dist/css/bootstrap.css';
+import './App.css';
+import { Route, Redirect } from 'react-router-dom';
 import Projects from './components/Projects';
 import Navbar from './components/Navbar';
+import ProjectDetails from './components/ProjectDetails';
+import TaskDetails from './components/TaskDetails';
+import Signup from './components/Signup';
 
-function App() {
-  return (
-    <div className="App">
+class App extends React.Component {
 
-      <Navbar />
+  state = {
+    user: this.props.user
+  }
 
-      <Route
-        exact
-        path="/projects"
-        component={Projects}
-      />
-    </div>
-  );
+  setUser = user => {
+    this.setState({
+      user: user
+    })
+  }
+
+  render() {
+    return (
+      <div className='App' >
+        <Navbar user={this.state.user} setUser={this.setUser} />
+
+        <Route
+          exact path='/projects'
+          render={props => {
+            if (this.state.user) return <Projects {...props}/>
+            else return <Redirect to='/' />
+          }}
+        />
+        <Route
+          exact path='/projects/:id'
+          render={props => <ProjectDetails {...props} user={this.state.user} />}
+        />
+        <Route
+          exact path='/tasks/:id'
+          component={TaskDetails}
+        />
+        <Route
+          exact
+          path='/signup'
+          // to the Signup we have to pass a reference to the setUser method
+          // this we cannot do via component={<some component>}
+          // For this we use the render prop - The term “render prop” refers to a technique for sharing 
+          // code between React components using a prop whose value is a function.
+          // A component with a render prop takes a function that returns a React element and calls it 
+          // instead of implementing its own render logic.
+          render={props => <Signup setUser={this.setUser} {...props} />}
+        />
+      </div>
+    );
+  }
 }
 
 export default App;
 ```
 
-Now let's add the functionality to add a project. We create a component AddProject.js. 
+#### Now let's add the signup component
 
 ```bash
-$ touch src/component/AddProject.js
-
+$ touch components/Signup.js
 ```
 
-The AddProject.js component will be used in the Projects component and will get the getData server call as a prop.
-
 ```js
-// src/components/Projects.js
-//
-  render() {
-    return (
-      <div className='projects-container'>
-        <AddProject getData={this.getData} />
-        <ProjectList projects={this.state.projects} />
-      </div>
-    );
-  }
-//
-```
-
-Now let's build the AddProject component. First build the form, then the handleChange, then the handleSubmit function. 
-
-After the axios post we call the getData function in Projects which causes the state there to be updated and new props will be passed to the ProjectList component. 
-
-```js
-// src/component/AddProject.js
+// components/Signup.js
 import React, { Component } from 'react';
-import axios from 'axios';
-import { Form, Button } from 'react-bootstrap';
+import { Form, Button, Alert } from 'react-bootstrap';
+import { signup } from '../services/auth';
 
-export default class AddProject extends Component {
+export default class Signup extends Component {
   state = {
-    title: '',
-    description: ''
+    username: '',
+    password: '',
+    message: ''
   };
 
   handleChange = event => {
-    const name = event.target.name;
-    const value = event.target.value;
+    const { name, value } = event.target;
 
     this.setState({
       [name]: value
@@ -569,584 +421,296 @@ export default class AddProject extends Component {
   handleSubmit = event => {
     event.preventDefault();
 
-    axios
-      .post('/api/projects', {
-        title: this.state.title,
-        description: this.state.description
-      })
-      .then(() => {
+    const { username, password } = this.state;
+
+    signup(username, password).then(data => {
+      if (data.message) {
         this.setState({
-          title: '',
-          description: ''
+          message: data.message,
+          username: '',
+          password: ''
         });
-        // updates the parent's component's state, which causes new props to be passed to the <ProjectList/> component
-        this.props.getData();
-      })
-      .catch(err => {
-        console.log(err);
-      });
+      } else {
+        this.props.setUser(data);
+        this.props.history.push('/projects');
+      }
+    });
   };
 
   render() {
     return (
-      <Form onSubmit={this.handleSubmit}>
-        {/* all groups (label + input) are grouped in a Form.Group */}
-        <Form.Group>
-          {/* <label></label> */}
-          <Form.Label htmlFor='title'>Title: </Form.Label>
-          {/* <input /> */}
-          <Form.Control
-            type='text'
-            id='title'
-            name='title'
-            value={this.state.title}
-            onChange={this.handleChange}
-          />
-        </Form.Group>
-        <Form.Group>
-          <Form.Label htmlFor='description'>Description: </Form.Label>
-          <Form.Control
-            type='text'
-            name='description'
-            id='description'
-            value={this.state.description}
-            onChange={this.handleChange}
-          />
-        </Form.Group>
-
-        <Button type='submit'>Add Project</Button>
-      </Form>
-    );
-  }
-}
-```
-
-Now let's add a Detail view for the project that we can reach by clicking on a project's title in the ProjectList component.
-
-First we turn the title into a link.
-
-```js
-// src/component/ProjectList.js
-// 
-import { Link } from 'react-router-dom';
-//
-<div key={project._id}>
-  <h3>
-    <Link to={`/projects/${project._id}`}>{project.title}</Link>
-  </h3>
-</div>
-```
-
-And we also need to add a route to App.js.
-
-```js
-// App.js
-import ProjectDetails from './components/ProjectDetails';
-//
-<Route
-  exact
-  path="/projects/:id"
-  component={ProjectDetails}
-/>
-```
-
-And of course create the conponent.
-
-```bash
-$ touch src/ProjectDetails.js
-```
-
-First let's just output title and description of the project.
-
-```js
-// src/components/ProjectDetails.js
-
-import React, { Component } from "react";
-import axios from "axios";
-
-export default class ProjectDetails extends Component {
-
-  state = {
-    project: null,
-    error: null
-  }
-
-  getData = () => {
-    const id = this.props.match.params.id;
-    axios
-      .get(`/api/projects/${id}`)
-      .then(response => {
-        console.log(response.data);
-        this.setState({
-          project: response.data,
-        });
-      })
-      .catch(err => {
-        console.log(err.response);
-        // handle err.response depending on err.response.status
-        if (err.response.status === 404) {
-          this.setState({ error: "Not found" });
-        }
-      });
-  };
-
-  componentDidMount = () => {
-    this.getData();
-  };
-
-  render() {
-    if (this.state.error) return <div>{this.state.error}</div>;
-    if (!this.state.project) return (<></>)
-    else return (
-      <div>
-        <h1>{this.state.project.title}</h1>
-        <p>{this.state.project.description}</p>
-      </div>
-    );
-  }
-}
-```
-
-Now let's add a delete button to the detail view.
-
-With props.history.push('/projects') we navigate directly to the projects route.
-
-```js
-// src/components/ProjectDetails.js
-//
-deleteProject = () => {
-  const id = this.props.match.params.id;
-  axios.delete(`/api/projects/${id}`).then(() => {
-    this.props.history.push("/projects");
-  });
-};
-//
-<h1>{this.state.project.title}</h1>
-<p>{this.state.project.description}</p>
-<Button variant="danger" onClick={this.deleteProject}>
-  Delete project
-</Button>
-```
-
-Now let's add an edit form. We want a button that when pressed toggles the edit form.
-
-```js
-// src/components/ProjectDetail.js
-
-state = {
-  project: null,
-  editForm: false,
-  error: null
-};
-
-toggleEditForm = () => {
-  this.setState({
-    editForm: !this.state.editForm
-  });
-};
-
-<Button onClick={this.toggleEditForm}>Show Edit form</Button>
-```
-
-The edit form that gets displayed will be in a separate component.
-
-Let's first reference it in ProjectDetails and then create it.
-
-```js
-// src/components/ProjectDetails.js
-// 
-import EditProject from './EditProject';
-// 
-    <div>
-      <h1>{this.state.project.title}</h1>
-      <p>{this.state.project.description}</p>
-      <Button onClick={this.toggleEditForm}>Show Edit form</Button>
-      <Button variant='danger' onClick={this.deleteProject}>
-        Delete project
-      </Button>
-      {/* form that is displayed when the edit button is clicked */}
-      {this.state.editForm && (
-        <EditProject
-          // spread props from the state (title and description will be needed in the child component)
-          {...this.state}
-          handleChange={this.handleChange}
-          handleSubmit={this.handleSubmit}
-        />
-      )}
-    </div>
-// 
-```
-
-Now let's create the EditProject.js component.
-
-```js
-// src/components/EditProject.js
-import React, { Component } from 'react';
-import { Form, Button } from 'react-bootstrap';
-
-class EditProject extends Component {
-  render() {
-    return (
-      <div>
-        <h2>Edit project: </h2>
-        <Form onSubmit={this.props.handleSubmit}>
+      <>
+        <h2>Signup</h2>
+        <Form onSubmit={this.handleSubmit}>
           <Form.Group>
-            <Form.Label>Title:</Form.Label>
+            <Form.Label htmlFor='username'>Username: </Form.Label>
             <Form.Control
               type='text'
-              name='title'
-              value={this.props.title}
-              onChange={this.props.handleChange}
+              name='username'
+              value={this.state.username}
+              onChange={this.handleChange}
+              id='username'
             />
           </Form.Group>
           <Form.Group>
-            <Form.Label>Description:</Form.Label>
+            <Form.Label htmlFor='password'>Password: </Form.Label>
             <Form.Control
-              type='text'
-              name='description'
-              value={this.props.description}
-              onChange={this.props.handleChange}
+              type='password'
+              name='password'
+              value={this.state.password}
+              onChange={this.handleChange}
+              id='password'
             />
           </Form.Group>
-
-          <Button type='submit'>Edit</Button>
+          {this.state.message && (
+            <Alert variant='danger'>{this.state.message}</Alert>
+          )}
+          <Button type='submit'>Signup</Button>
         </Form>
-      </div>
+      </>
     );
   }
 }
-
-export default EditProject;
 ```
 
-The handleChange and handlesubmit methods in EditProject got passed in as a prop that's why we have to add these methods in the parent component. 
-
-We also want to add the title and the description to the state of the ProjectDetail
+#### And let's also update the Navbar
 
 ```js
-// src/components/ProjectDetails.js
-//
-  state = {
-    project: null,
-    error: null,
-    editForm: false,
-    title: '',
-    description: ''
-  }
+// components/Navbar.js
 
-  handleChange = event => {
-      const { name, value } = event.target;
+import React from 'react'
+import { Link } from 'react-router-dom';
+import { Navbar as Nav } from 'react-bootstrap';
+import { logout } from '../services/auth';
 
-      this.setState({
-        [name]: value
-      });
-    };
+const handleLogout = props => {
+  logout().then(() => {
+    props.setUser(null);
+  });
+};
 
-  handleSubmit = event => {
-    event.preventDefault();
-    const id = this.props.match.params.id;
-    axios
-      .put(`/api/projects/${id}`, {
-        title: this.state.title,
-        description: this.state.description
-      })
-      .then(response => {
-        this.setState({
-          project: response.data,
-          title: response.data.title,
-          description: response.data.description,
-          editForm: false
-        });
-      })
-      .catch(err => {
-        console.log(err);
-      });
-  };
-```
-
-### Adding Tasks
-
-Now let's also show the tasks in the ProjectDetails.js view and have a form to add tasks. To toggle the task form we use the same principle as we did for the edit form.
-
-Let's add a button, a boolean for the taskForm in the state and the reference for a AddTask component in the render method.
-
-```js
-// src/components/ProjectDetail.js
-//
-import AddTask from './AddTask';
-export default class ProjectDetails extends Component {
-
-  state = {
-    project: null,
-    error: null,
-    title: '',
-    description: '',
-    editForm: false,
-    // boolean in the state
-    taskForm: false
-  }
-
-
-
-  toggleEditForm = () => {
-    this.setState({
-      editForm: !this.state.editForm
-    });
-  };
-
-  // toggle method
-  toggleTaskForm = () => {
-    this.setState({
-      taskForm: !this.state.taskForm
-    });
-  }
-
-
-  render() {
-    if (this.state.error) return <div>{this.state.error}</div>;
-    if (!this.state.project) return (<></>)
-    else return (
-      <div>
-        <h1>{this.state.project.title}</h1>
-        <p>{this.state.project.description}</p>
-        <Button onClick={this.toggleEditForm}>Show Edit form</Button>
-        
-        // the button
-        <Button onClick={this.toggleTaskForm}>Show Task form</Button>
-
-        <Button variant='danger' onClick={this.deleteProject}>
-          Delete project
-        </Button>
-        {/* form that is displayed when the edit button is clicked */}
-        {
-          this.state.editForm && (
-            <EditProject
-              // spread props from the state (title and description will be needed in the child component)
-              {...this.state}
-              handleChange={this.handleChange}
-              handleSubmit={this.handleSubmit}
-            />
-          )
-        }
-        // and the task form 
-        {this.state.taskForm && (
-          <AddTask
-            projectId={this.state.project._id}
-            getData={this.getData}
-            hideForm={() => this.setState({ taskForm: false })}
-          />
+const Navbar = props => {
+  return (
+    <Nav className='nav justify-content-end' bg='primary'>
+      {props.user && <Nav.Brand>Welcome, {props.user.username}</Nav.Brand>}
+      <Nav.Brand>
+        <Link to='/'>Home</Link>
+      </Nav.Brand>
+      {props.user ? (
+        <>
+          <Nav.Brand>
+            <Link to='/projects'>Projects</Link>
+          </Nav.Brand>
+          <Nav.Brand>
+            <Link to='/' onClick={() => handleLogout(props)}>
+              Logout
+            </Link>
+          </Nav.Brand>
+        </>
+      ) : (
+          <>
+            <Nav.Brand>
+              <Link to='/signup'>Signup</Link>
+            </Nav.Brand>
+            <Nav.Brand>
+              <Link to='/login'>Login</Link>
+            </Nav.Brand>
+          </>
         )}
-      </div >
-    );
-  }
+    </Nav>
+  )
 }
+
+export default Navbar;
 ```
 
-Now we have to create the AddTask component that we are referencing in the render method.
+#### We already referenced the Login component in Navbar.js so let's create it.
 
 ```bash
-$ touch src/AddTask.js
+$ touch components/Login.js
 ```
 
 ```js
-import React, { Component } from 'react';
-import { Form, Button } from 'react-bootstrap';
-import axios from 'axios';
+// components/Login.js
 
-export default class AddTask extends Component {
+import React, { Component } from 'react';
+import { Form, Button, Alert } from 'react-bootstrap';
+import { login } from '../services/auth';
+
+export default class Login extends Component {
   state = {
-    title: '',
-    description: ''
+    username: '',
+    password: '',
+    message: ''
   };
 
   handleChange = event => {
     const { name, value } = event.target;
-    this.setState({ [name]: value });
+
+    this.setState({
+      [name]: value
+    });
   };
 
   handleSubmit = event => {
     event.preventDefault();
 
-    const { title, description } = this.state;
+    const { username, password } = this.state;
 
-    axios
-      .post('/api/tasks', {
-        title,
-        description,
-        projectId: this.props.projectId
-      })
-      .then(() => {
-        this.props.getData();
-        this.props.hideForm();
-      })
-      .catch(err => {
-        console.log(err);
-      });
+    login(username, password).then(data => {
+      if (data.message) {
+        this.setState({
+          message: data.message,
+          username: '',
+          password: ''
+        });
+      } else {
+        // successfully logged in
+        // update the state for the parent component
+        this.props.setUser(data);
+        this.props.history.push('/projects');
+      }
+    });
   };
 
   render() {
     return (
-      <div>
-        <h2>Add task: </h2>
+      <>
+        <h2>Login</h2>
         <Form onSubmit={this.handleSubmit}>
           <Form.Group>
-            <Form.Label>Title:</Form.Label>
+            <Form.Label htmlFor='username'>Username: </Form.Label>
             <Form.Control
               type='text'
-              name='title'
-              value={this.state.title}
+              name='username'
+              value={this.state.username}
               onChange={this.handleChange}
+              id='username'
             />
           </Form.Group>
           <Form.Group>
-            <Form.Label>Description:</Form.Label>
+            <Form.Label htmlFor='password'>Password: </Form.Label>
             <Form.Control
-              type='text'
-              name='description'
-              value={this.state.description}
+              type='password'
+              name='password'
+              value={this.state.password}
               onChange={this.handleChange}
+              id='password'
             />
           </Form.Group>
-
-          <Button type='submit'>Add</Button>
+          {this.state.message && (
+            <Alert variant='danger'>{this.state.message}</Alert>
+          )}
+          <Button type='submit'>Login</Button>
         </Form>
-      </div>
+      </>
     );
   }
 }
 ```
 
-Now try to add a project first and then a task. You shoul get an error. 
-
-That is because in app.js the reference to the task routes is missing 🙃
-
-Add it and proceed 🚀
-
-We want to now also render the tasks. We create a component TaskList.js.
-
-```bash
-$ touch src/components/TaskList.js
-```
+#### Now we also want to add a route to the Login component.
 
 ```js
-import React from "react";
-import { Link } from "react-router-dom";
+// App.js
+import Login from './components/Login';
+// 
+        <Route
+          exact
+          path='/login'
+          render={(props) => <Login setUser={this.setUser} {...props}/>}
+        />
+//
+```
 
-const TaskList = props => {
+#### Now we can use the logged in user in the ProjectDetails component to check if the user is allowed to delete the project.
+
+```js
+// components/ProjectDetails.js
+  render() {
+    if (this.state.error) return <div>{this.state.error}</div>
+    if (!this.state.project) return (<></>)
+
+    // we set a boolean if there is a loggedInUser and the user is also the owner of the project
+    let allowedToDelete = false;
+    const user = this.props.user;
+    const owner = this.state.project.owner;
+    if (user && user._id === owner) allowedToDelete = true;
+
+    return (
+      <div>
+        <h1>{this.state.project.title}</h1>
+        <p>{this.state.project.description}</p>
+        // then we only show the button if the the deletion is allowed 
+        {allowedToDelete && (
+          <Button variant="danger" onClick={this.deleteProject}>
+            Delete project
+          </Button>
+        )}
+```
+
+## Bonus
+
+#### If we want to protect a route we can do it like this
+
+```js
+// App.js
+        <Route
+          exact
+          path='/projects'
+          // instead of component={Projects} we use a render props and an if else statement
+          render={props => {
+            if (this.state.user) return <Projects {...props} />
+            else return <Redirect to='/' />
+          }}
+        />
+```
+
+#### We can create a custom component to protect a route.
+
+```js
+// components/ProtectedRoute
+import React from 'react';
+import { Route, Redirect } from 'react-router-dom';
+
+// here we destructure the props - we rename the component prop by using the colon
+const ProtectedRoute = ({
+  component: Component,
+  user,
+  path,
+  redirectPath = '/',
+  ...rest
+}) => {
   return (
-    <div>
-      {props.tasks.length > 0 && <h2>Tasks:</h2>}
-      {props.tasks.map(task => {
-        return (
-          <div key={task._id}>
-            // <Link to={`/tasks/${task._id}`}>
-              <h3>{task.title}</h3>
-            // </Link>
-          </div>
-        );
-      })}
-    </div>
+    <Route
+      path={path}
+      render={props => {
+        return user ? (
+          <Component {...props} {...rest} user={user} />
+        ) : (
+            <Redirect to={redirectPath} />
+          );
+      }}
+    />
   );
 };
 
-export default TaskList;
+export default ProtectedRoute;
 ```
 
-We use it in the ProjectDetails.js
+#### And use it in App.js
 
 ```js
-// src/components/ProjectDetails
-import TaskList from './TaskList';
-//
-      {this.state.taskForm && (
-        <AddTask
-          projectId={this.state.project._id}
-          getData={this.getData}
-          hideForm={() => this.setState({ taskForm: false })}
-        />
-      )}
-      // add the tasklist
-      <TaskList tasks={this.state.project.tasks} />
-    </div>
-```
-
-Now we add a detail view for the task.
-
-```bash
-$ touch TaskDetail.js
-```
-
-In TaskList we turn the heading into a link.
-
-```js
-// src/components/TaskList.js
-//
-  <div key={task._id}>
-    // <Link to={`/tasks/${task._id}`}>
-      <h3>{task.title}</h3>
-    // </Link>
-  </div>
+// components/App.js
+import ProtectedRoute from './components/ProtectedRoute';
+// 
+<ProtectedRoute
+  exact
+  path='/projects'
+  // this is an additional prop that is taken care of with ...rest
+  foo='bar'
+  user={this.state.user}
+  component={Projects}
+/>
 //
 ```
-
-Then we need to add the route in App.js
-
-```js
-// src/App.js
-import TaskDetails from './components/TaskDetails';
-//
-function App() {
-  return (
-    <div className="App">
-      //
-      <Route exact path="/tasks/:id" component={TaskDetails} />
-    </div>
-```
-
-```js
-// src/components/TaskDetails.js
-import React, { Component } from 'react';
-import { Link } from 'react-router-dom';
-
-import axios from 'axios';
-
-export default class ProjectDetails extends Component {
-  state = {
-    title: '',
-    description: '',
-    project: ''
-  };
-
-  componentDidMount() {
-    const taskId = this.props.match.params.id;
-
-    return axios
-      .get(`/api/tasks/${taskId}`)
-      .then(response => {
-        const { title, description, project } = response.data;
-        this.setState({ title, description, project });
-      })
-      .catch(err => {
-        console.log(err);
-      });
-  }
-
-  render() {
-    const task = {
-      title: this.state.title,
-      description: this.state.description,
-      project: this.state.project
-    };
-
-    return (
-      <div>
-        <h1>{task.title}</h1>
-        <p>{task.description}</p>
-        <Link to={`/projects/${task.project}`}>Back to project</Link>
-      </div>
-    );
-  }
-}
-```
-
-And we are done 🤩
