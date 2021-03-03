@@ -1,37 +1,31 @@
-import React, { Component } from 'react'
+import React, { useState, useEffect } from 'react'
 import axios from 'axios';
 import ProjectList from './ProjectList';
 import AddProject from './AddProject';
 
-export default class Projects extends Component {
+export default function Projects() {
 
-  state = {
-    projects: []
-  }
+  const [projects, setProjects] = useState([])
 
-  componentDidMount() {
-    this.getData();
-  }
+  useEffect(() => {
+    getData()
+  })
 
-  getData = () => {
+  const getData = () => {
     axios.get('/api/projects')
       .then(response => {
         console.log(response)
-        this.setState({
-          projects: response.data
-        })
+        setProjects(response.data)
       })
       .catch(err => {
         console.log(err)
       })
   }
 
-  render() {
-    return (
-      <div>
-        <AddProject getData={this.getData} />
-        <ProjectList projects={this.state.projects} />
-      </div>
-    )
-  }
+  return (
+    <div>
+      <AddProject getData={getData} />
+      <ProjectList projects={projects} />
+    </div>
+  )
 }
