@@ -56,7 +56,7 @@ router.post('/login', (req, res, next) => {
       }
       return res.status(200).json(user);
     })
-  })
+  })(req, res)
 });
 
 router.delete('/logout', (req, res) => {
