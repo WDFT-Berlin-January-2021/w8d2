@@ -21,7 +21,7 @@ require("./config")(app);
 // session configuration
 const session = require('express-session');
 // session store using mongo
-const MongoStore = require('connect-mongo')(session)
+const MongoStore = require('connect-mongo').default;
 
 const mongoose = require('./db/index');
 
@@ -33,8 +33,9 @@ app.use(
     //Forces the session to be saved back to the session store, 
     // even if the session was never modified during the request.
     resave: true,
-    store: new MongoStore({
-      mongooseConnection: mongoose.connection
+    store: MongoStore.create({
+      // mongooseConnection: mongoose.connection
+      mongoUrl: process.env.MONGODB_URI
     })
   })
 )
